@@ -29,9 +29,11 @@
 #include "app_imu.h"
 #include "app_chassis.h"
 #include "app_odom.h"
+#include "app_pose.h"
 #include "servo_bus.h"
-#include "servo_arm.h"
 #include "bsp_debug.h"
+#include "app_action.h"
+#include "user_plan.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -120,9 +122,11 @@ int main(void)
   }
   AppIMU_Init();
   AppOdom_Init();
+  Pose_Init();             /* ★世界坐标：以当前里程计和朝向为零点 */
   ServoBus_Init();
-  ServoArm_Init();
   Chassis_Init();
+  Act_Init();              /* ★动作层：原子动作接口 */
+  Plan_Init();             /* ★你的规划初始化 */
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -132,17 +136,23 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /*
-     * 机械臂示教/回放由按键操作，ServoArm_Poll() 内部处理，无需手动调用：
-     *   PC5 长按 → 开始示教（舵机泄力，可用手拖动机械臂）
-     *   PC5 短按 → 记录当前姿态为一个示教点
-     *   PC5 长按 → 结束示教
-     *   PC4 短按 → 依次走到各示教点（默认第 0 组，可用 ServoArm_SetTeam() 切换）
+    /* ---- 原有行为已停用 ----
+     *   ServoArm_Poll();  示教 / 回放（servo_arm.c 已移出编译，源码在 App/_attic/）
+     *   Chassis_Task() 的自动行为（航向保持 / 自动回原点）已在速度模式下不再生效
      */
+
+    /* 传感器采样（保留：Pose 用的是它们的数据） */
     AppIMU_Update();
     AppOdom_Update();
-    ServoArm_Poll();
-    Chassis_Task();
+    Pose_Update();           /* ★融合陀螺仪 → 世界坐标 */
+
+    Chassis_Task();          /* ★底盘驱动：把速度指令变成 RS485 帧发出去（必须每拍调） */
+
+    ServoBus_Poll();         /* ★收舵机位置回传，更新 Act_ArmAngle0..3 / Act_GripAngle */
+
+    /* 动作层 + 你的规划 */
+    Act_Task();
+    Plan_Task();
   }
   /* USER CODE END 3 */
 }

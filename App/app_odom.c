@@ -7,7 +7,6 @@
 #include "app_odom.h"
 #include "main.h"
 #include "as5600.h"
-#include "bsp_debug.h"
 
 /* ===== 按实车填写 ===== */
 
@@ -24,9 +23,6 @@
 #define ODOM_X_SIGN             (+1.0f)
 #define ODOM_Y_SIGN             (+1.0f)
 
-/* 从 UART5 打印编码器数据的周期 (ms)；置 0 关闭 */
-#define ODOM_PRINT_PERIOD_MS    100u
-
 volatile float    g_odom_x_mm  = 0.0f;
 volatile float    g_odom_y_mm  = 0.0f;
 volatile uint8_t  g_odom_online[ODOM_AXIS_NUM] = {0};
@@ -42,9 +38,6 @@ void AppOdom_Init(void)
 void AppOdom_Update(void)
 {
   static uint32_t last_ms = 0u;
-#if (ODOM_PRINT_PERIOD_MS > 0u)
-  static uint32_t last_print_ms = 0u;
-#endif
   const AS5600_t *ex;
   const AS5600_t *ey;
 
@@ -74,23 +67,6 @@ void AppOdom_Update(void)
     g_odom_magnet[1]    = ey->magnet;
     g_odom_err[1]       = ey->err_cnt;
   }
-
-#if (ODOM_PRINT_PERIOD_MS > 0u)
-  if ((HAL_GetTick() - last_print_ms) >= ODOM_PRINT_PERIOD_MS)
-  {
-    last_print_ms = HAL_GetTick();
-
-    if ((ex != NULL) && (ey != NULL))
-    {
-      Debug_Printf("[ENC] x=%8.2f y=%8.2f raw=%4u,%4u on=%u%u mg=%u%u e=%lu,%lu\r\n",
-                   (double)g_odom_x_mm, (double)g_odom_y_mm,
-                   (unsigned)ex->raw, (unsigned)ey->raw,
-                   (unsigned)ex->online, (unsigned)ey->online,
-                   (unsigned)ex->magnet, (unsigned)ey->magnet,
-                   (unsigned long)ex->err_cnt, (unsigned long)ey->err_cnt);
-    }
-  }
-#endif
 }
 
 void AppOdom_Reset(void)

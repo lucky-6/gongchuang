@@ -23,8 +23,19 @@
 typedef enum
 {
   CHASSIS_MODE_AUTO = 0,   /* 航向闭环（默认）；返航开启时叠加位置闭环 */
-  CHASSIS_MODE_OPEN        /* 开环：直接下发四轮转速，用于标定 */
+  CHASSIS_MODE_OPEN,       /* 开环：直接下发四轮转速（不含安装符号），用于标定 */
+  CHASSIS_MODE_VELOCITY    /* ★速度模式：直接给车体速度（vx, vy, ω），不做航向闭环 */
 } Chassis_Mode_t;
+
+/**
+  * @brief 直接给车体速度（仅 CHASSIS_MODE_VELOCITY 模式有效）
+  * @param vx_mms  前后速度，前进为正 (mm/s)
+  * @param vy_mms  左右速度，左移为正 (mm/s)
+  * @param w_dps   自转角速度，逆时针为正 (°/s)
+  * @note  内部已含运动学换算 + 安装符号补偿；速度变化率受限幅（约 0.8 m/s²）。
+  *        这个函数只是"记下目标"，真正下发在 Chassis_Task() 里。
+  */
+void  Chassis_SetVelocity(float vx_mms, float vy_mms, float w_dps);
 
 /** @brief 初始化：使能四台电机、以当前朝向为目标航向、里程原点清零 */
 void  Chassis_Init(void);
@@ -43,7 +54,9 @@ float Chassis_GetYawError(void);
 
 /**
   * @brief  启动返航：用两轴里程计反馈把车开回上电位置（里程计零点）
-  * @note   返航过程中航向闭环同时工作（边走边保持上电时的朝向）；
+  * @note   ★**纯手动**：固件里没有任何地方会自动调用它。
+  *         上电、运行、跑完动作之后都不会自己回原点，必须由你的代码显式调用。
+  *         返航过程中航向闭环同时工作（边走边保持上电时的朝向）；
   *         里程计掉线、超时或到达容差内会自动结束。
   */
 void  Chassis_ReturnToOrigin(void);
@@ -56,15 +69,6 @@ bool  Chassis_IsReturning(void);
 
 /** @brief 距上电原点的直线距离 (mm) */
 float Chassis_GetHomeDistance(void);
-
-/**
-  * @brief  开/关自动回原点（位置保持）
-  * @note   默认由 CHASSIS_AUTO_HOME 决定（1 = 上电即启用）：
-  *         被移动偏离原点超过 HOME_RETRIGGER_MM 自动返航，
-  *         回到 HOME_TOL_MM 内停止，可反复触发。
-  */
-void    Chassis_SetAutoHome(uint8_t enable);
-uint8_t Chassis_GetAutoHome(void);
 
 /* ---- 开环与停止 ---- */
 

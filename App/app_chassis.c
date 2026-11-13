@@ -36,12 +36,38 @@
 #define CHASSIS_RPM_PER_MPS  (60.0f / (2.0f * 3.14159265f * CHASSIS_WHEEL_R))
 
 /* ===== 航向闭环参数 ===== */
-#define CHASSIS_MSTEP        128u     /* 驱动板细分（与板子设置一致） */
-#define CHASSIS_ACC          250u     /* 驱动板加减速参数 0~255，越大越快 */
-#define CHASSIS_KP           3.0f     /* 航向误差 (°) → 目标角速度 (°/s) */
-#define CHASSIS_KD           0.2f     /* 角速度阻尼 */
+#define CHASSIS_MSTEP        128u     /* 驱动板细分（必须和板子 MStep 设置一致） */
+/*
+ * 驱动板加减速参数 (0~255)。手册公式：每个速度单位 (256-acc)×50µs，
+ * 128 细分下 1 个速度单位 = 0.125 RPM。
+ *   acc=250 -> 300µs/单位 -> 约 417 RPM/s -> 折算成车身角速度只有 278 °/s²
+ *   acc=255 ->  50µs/单位 -> 约 2500 RPM/s -> 约 1668 °/s²
+ *
+ * 为什么必须是 255：
+ *   导航航向环是 P 控制 ω = 7×误差，要求执行机构减速度 > 7×ω。
+ *   acc=250 时只有 278 °/s²，ω 超过 40°/s 就跟不上命令；
+ *   从 120°/s 刹停要滑 120²/(2×278) ≈ 26° ——
+ *   实测原地转 90° 超调到 101.6°、再回摆到 86.5°，就是这个原因。
+ *   acc=255 后减速度 1668 °/s²，240°/s 以内都能精确跟随，
+ *   加减速曲线完全由主机侧斜坡限幅器决定，驱动板变成"透明"执行器。
+ */
+#define CHASSIS_ACC          255u
+#define CHASSIS_KP           0.8f     /* 航向误差 (°) → 目标角速度 (°/s) */
+#define CHASSIS_KD           0.8f     /* 角速度阻尼 */
 #define CHASSIS_OMEGA_MAX    180.0f   /* 自转角速度上限 (°/s) */
 #define CHASSIS_DEADBAND_DEG 1.0f     /* 误差死区 (°) */
+
+/*
+ * 角速度指令变化率限幅 (°/s²)。
+ *   vx/vy 一直有 HOME_ACC_MPS2 限幅，但 ω 以前是**直接**灌进运动学的：
+ *   导航每 10 ms 用带噪声的 yaw 算一次 ω，跳变会原封不动甩给四台驱动板。
+ *   acc=255 后驱动板能到 1668 °/s²，这里给 1600 让主机侧成为主导：
+ *   既不拖慢刹车，也不会把 yaw 噪声直接甩下去。
+ */
+#define CHASSIS_OMEGA_ACC    1600.0f
+
+/* 轮速死区 (RPM)：低于这个值直接发 0，避免方向位在 0 附近反复翻转 */
+#define CHASSIS_RPM_DEADBAND 0.30f
 
 /* ===== 返航参数 ===== */
 /*
@@ -51,44 +77,63 @@
  * 远超容差 → 冲过头 → 再次触发 → 前后晃动。加速度阻尼项后末端是"主动刹车"而不是滑行。
  */
 #define HOME_KP              2.5f     /* 位置误差 (m) → 速度 (m/s) */
-#define HOME_KD              1.0f     /* 速度阻尼（速度由里程计差分估计） */
+#define HOME_KD              2.0f     /* 速度阻尼（速度由里程计差分估计） */
 #define HOME_V_MAX_MPS       0.25f    /* 平移速度上限 (m/s) */
-#define HOME_V_MIN_MPS       0.03f    /* 平移最小速度 (m/s)，防静摩擦推不动 */
+#define HOME_V_MIN_MPS       0.05f    /* 平移最小速度 (m/s)，防静摩擦推不动 */
 #define HOME_MIN_APPLY_MM    60.0f    /* 只有距原点超过该值才施加最小速度，末端不用 */
-#define HOME_ACC_MPS2        0.8f     /* 指令速度最大变化率 (m/s²)，让起步/停车柔和 */
-#define HOME_TOL_MM          3.0f     /* 到位判定：距原点小于该值即认为到达 (mm) */
+
+/*
+ * 前后方向(vx)的符号修正。
+ *   标定判据：发 Act_Move(100,0,0)（只给前后速度，不给导航），
+ *     车应朝车头方向前进、且串口打印的 x 增大。
+ *   · 车朝前走、x 却减小        → 是**里程计**符号问题，
+ *                                 改 app_odom.c 的 ODOM_X_SIGN 为 -1.0f，这里保持 +1
+ *   · 车往后退、x 增大          → 是**指令**符号问题，把这里改成 -1.0f
+ * 注意这只翻前后，不影响横移(vy)和旋转(ω) —— 那两路已验证正确。
+ */
+#define CHASSIS_FWD_SIGN     (1.0f)
+#define HOME_ACC_MPS2        0.5f     /* 指令速度最大变化率 (m/s²)，让起步/停车柔和 */
+#define HOME_TOL_MM          5.0f     /* 到位判定：距原点小于该值即认为到达 (mm) */
 #define HOME_TIMEOUT_MS      30000u   /* 返航超时 (ms) */
 
 /*
- * 自动回原点（位置保持）：
- *   1 = 上电即启用：**只要偏离原点超过到位容差 HOME_TOL_MM 就立刻返航**，
- *       回到容差内停下；再偏离则再次触发，等效于连续位置保持。
- *   0 = 只能手动调用 Chassis_ReturnToOrigin() 触发。
+ * 返航 = 纯手动功能。
+ *   上电/运行中【不会】自动回原点（原来的 CHASSIS_AUTO_HOME 自动触发已删除）。
+ *   只有显式调用 Chassis_ReturnToOrigin() 才会开始返航，
+ *   回到 HOME_TOL_MM 内、里程计掉线、或超过 HOME_TIMEOUT_MS 时结束。
  */
-#define CHASSIS_AUTO_HOME    1u
-
-/*
- * 返航触发阈值 (mm)：0 = 不设阈值，任何超出容差的偏差都立即返航（当前设置）。
- * 若发现车在原点附近小幅反复启停（容差边界上来回触发），可以把它设成
- * 比 HOME_TOL_MM 大一些（例如 30~60）构成迟滞；代价是小于该值的偏差不会被纠正。
- */
-#define HOME_RETRIGGER_MM    0.0f
-
-/* 上次返航中止后，至少等这么久才允许再次自动触发 (ms)，避免反复重试 */
-#define HOME_RETRY_DELAY_MS  2000u
 
 /* ===== 总线与控制周期 ===== */
 #define CHASSIS_PERIOD_MS    20u      /* 控制周期 (ms) */
 #define CHASSIS_TX_TIMEOUT   20u      /* 单帧发送超时 (ms) */
-#define CHASSIS_ACK_TIMEOUT  10u      /* 等应答超时 (ms) */
+/*
+ * 等应答超时 (ms)。
+ *   驱动板正常应答约 1ms（7 字节 @115200 ≈ 0.6ms + 芯片转向时间）。
+ *   以前是 10ms × 4 台 = 40ms，把主循环硬拖到 24Hz —— 实测主循环周期约 41ms
+ *   正好等于 4×10.6ms。降到 4ms 后最坏 4×4.6 = 18.4ms，仍在 20ms 周期内。
+ *   ⚠ 若发现 g_chassis_online_count 长期为 0（说明驱动板应答真的慢），
+ *     把它调回 6~8ms；这个超时只影响"在线标志"，不影响速度指令下发。
+ */
+#define CHASSIS_ACK_TIMEOUT  4u       /* 等应答超时 (ms) */
 #define CHASSIS_FAIL_LIMIT   3u       /* 连续丢应答判离线次数 */
 
 /*
- * 上电默认模式：标定完成后默认 AUTO（上电保持航向）。
- * 若以后改动接线或机械装配，先改回 CHASSIS_MODE_OPEN 再重新标定，
+ * 上电默认模式。
+ *
+ * ★现在默认 CHASSIS_MODE_VELOCITY：上电后车体速度目标全为 0，
+ *   四台驱动板只会收到"速度 0"指令，**完全不会自己动**。
+ *   （以前默认 AUTO，AUTO 会跑航向保持，用陀螺仪输出角速度去锁车头，
+ *     看起来就像"上电自己动/自己回原点"。自动返航已在前一步删除。）
+ *
+ * 其它模式没有删、随时可用：
+ *   · Act_Move() 会自己切到 VELOCITY（和以前一样）
+ *   · 想要上电就锁航向：显式调 Chassis_SetMode(CHASSIS_MODE_AUTO)
+ *   · 想开环标定：显式调 Chassis_SetMode(CHASSIS_MODE_OPEN)
+ *
+ * 标定提示：若改动接线或机械装配，先切 OPEN 再重新标定，
  * 否则运动学/符号不对时闭环会变成正反馈把车开走。
  */
-#define CHASSIS_DEFAULT_MODE  CHASSIS_MODE_AUTO
+#define CHASSIS_DEFAULT_MODE  CHASSIS_MODE_VELOCITY
 
 /* UART5 状态打印周期 (ms)；置 0 关闭 */
 #define CHASSIS_PRINT_PERIOD_MS   0u
@@ -121,14 +166,19 @@ static const int8_t s_mount_sign[CHASSIS_MOTOR_NUM] =
 
 static float   s_target_yaw    = 0.0f;
 static uint8_t s_target_locked = 0u;
-static uint8_t  s_auto_home     = (uint8_t)CHASSIS_AUTO_HOME;
-static uint32_t s_home_abort_ms = 0u;
 static float    s_odom_x_last = 0.0f;   /* 上一拍里程计位置，用于差分测速 */
 static float    s_odom_y_last = 0.0f;
 static float    s_vel_x       = 0.0f;   /* 车体实测速度 (m/s)，一阶低通后 */
 static float    s_vel_y       = 0.0f;
 static float    s_vx_cmd      = 0.0f;   /* 平滑后的平移指令 (m/s) */
 static float    s_vy_cmd      = 0.0f;
+static float    s_omega_cmd   = 0.0f;   /* 平滑后的自转指令 (°/s) */
+
+/* 速度模式（CHASSIS_MODE_VELOCITY）的目标，由 Chassis_SetVelocity 写入 */
+static float    s_cmd_vx      = 0.0f;   /* m/s，前进为正 */
+static float    s_cmd_vy      = 0.0f;   /* m/s，右移为正 */
+static float    s_cmd_w       = 0.0f;   /* °/s，逆时针为正 */
+
 static uint8_t s_fail_cnt[CHASSIS_MOTOR_NUM] = {0};
 
 volatile uint8_t g_chassis_mode      = (uint8_t)CHASSIS_DEFAULT_MODE;
@@ -170,12 +220,6 @@ static float Chassis_Clamp(float v, float lo, float hi)
   return v;
 }
 
-/* 四舍五入到整数 RPM（避免小量被截断成 0 而电机不动） */
-static int32_t Chassis_RoundRpm(float rpm)
-{
-  return (int32_t)((rpm >= 0.0f) ? (rpm + 0.5f) : (rpm - 0.5f));
-}
-
 /* 周期打印状态，便于不用调试器也能判断（默认关闭） */
 static void Chassis_ReportStatus(float err, float omega)
 {
@@ -208,7 +252,15 @@ static bool Chassis_SendWheel(uint8_t wheel, float rpm)
   uint8_t  addr = s_wheel_addr[wheel];
   uint16_t len;
 
-  len = MKS_BuildSpeed(addr, Chassis_RoundRpm(rpm), CHASSIS_MSTEP, CHASSIS_ACC, frame);
+  /* 死区：极小速度直接发 0，避免方向位在 0 附近反复翻转（换向抖动） */
+  if (fabsf(rpm) < CHASSIS_RPM_DEADBAND)
+  {
+    rpm = 0.0f;
+  }
+
+  /* 用浮点版组帧：按"速度值"精度取整（128 细分时 1 单位 = 0.125 RPM），
+   * 不再先量化到 1 RPM（那样会一次跳 8 个单位，低速时四轮不协调） */
+  len = MKS_BuildSpeedF(addr, rpm, CHASSIS_MSTEP, CHASSIS_ACC, frame);
 
   RS485_FlushRx();                       /* 先丢掉总线上的残留字节 */
   if (!RS485_Send(frame, len, CHASSIS_TX_TIMEOUT))
@@ -256,7 +308,6 @@ void Chassis_Init(void)
   g_chassis_homing     = 0u;
   g_chassis_home_done  = 0u;
   g_chassis_home_abort = 0u;
-  s_home_abort_ms      = 0u;
   g_chassis_vx         = 0.0f;
   g_chassis_vy         = 0.0f;
 }
@@ -300,7 +351,14 @@ void Chassis_Task(void)
     s_vel_y += 0.35f * (raw_vy - s_vel_y);
   }
 
-  if (g_chassis_mode == (uint8_t)CHASSIS_MODE_OPEN)
+  if (g_chassis_mode == (uint8_t)CHASSIS_MODE_VELOCITY)
+  {
+    /* ---- 速度模式：直接用车体速度目标，不做航向闭环、不做返航 ---- */
+    vx_target = s_cmd_vx;          /* m/s */
+    vy_target = s_cmd_vy;
+    omega     = s_cmd_w;           /* °/s */
+  }
+  else if (g_chassis_mode == (uint8_t)CHASSIS_MODE_OPEN)
   {
     /* 开环：下面直接用 g_chassis_openloop[w] */
   }
@@ -330,34 +388,20 @@ void Chassis_Task(void)
       omega = Chassis_Clamp((CHASSIS_KP * err) - (CHASSIS_KD * imu.gz),
                             -CHASSIS_OMEGA_MAX, CHASSIS_OMEGA_MAX);
 
-      /* ---- 返航：位置闭环（需要两轴里程计） ---- */
-      /* 自动回原点：偏离超过重触发阈值就自己开始返航 */
-      if ((s_auto_home != 0u) && (g_chassis_homing == 0u) &&
-          (g_odom_online[0] != 0u) && (g_odom_online[1] != 0u) &&
-          ((HAL_GetTick() - s_home_abort_ms) > HOME_RETRY_DELAY_MS))
-      {
-        float dx = g_odom_x_mm;
-        float dy = g_odom_y_mm;
-
-        if (sqrtf((dx * dx) + (dy * dy)) > HOME_RETRIGGER_MM)
-        {
-          Chassis_ReturnToOrigin();
-        }
-      }
-
+      /* ---- 返航：位置闭环（需要两轴里程计） ----
+       * ★自动回原点已删除：这里不再有任何自发触发。
+       *   只有显式调用 Chassis_ReturnToOrigin() 才会进入下面的闭环。 */
       if (g_chassis_homing != 0u)
       {
         if ((g_odom_online[0] == 0u) || (g_odom_online[1] == 0u))
         {
           g_chassis_homing    = 0u;      /* 里程计掉线：放弃返航，避免盲走 */
           g_chassis_home_abort = 1u;
-          s_home_abort_ms      = HAL_GetTick();
         }
         else if ((HAL_GetTick() - s_home_start_ms) > HOME_TIMEOUT_MS)
         {
           g_chassis_homing    = 0u;      /* 超时 */
           g_chassis_home_abort = 1u;
-          s_home_abort_ms      = HAL_GetTick();
         }
         else
         {
@@ -410,8 +454,18 @@ void Chassis_Task(void)
   else if (vy_target < (s_vy_cmd - max_dv)) { s_vy_cmd -= max_dv; }
   else                                      { s_vy_cmd = vy_target; }
 
-  vx = s_vx_cmd;
+  vx = CHASSIS_FWD_SIGN * s_vx_cmd;   /* 前后方向单独可翻（判据见宏定义处） */
   vy = s_vy_cmd;
+
+  /* ω 也做变化率限幅：命令跳变不再直接甩到驱动板上 */
+  {
+    float max_dw = CHASSIS_OMEGA_ACC * dt_s;
+
+    if (omega > (s_omega_cmd + max_dw))      { s_omega_cmd += max_dw; }
+    else if (omega < (s_omega_cmd - max_dw)) { s_omega_cmd -= max_dw; }
+    else                                     { s_omega_cmd = omega; }
+    omega = s_omega_cmd;
+  }
 
   g_chassis_yaw_err = err;
   g_chassis_omega   = omega;
@@ -508,20 +562,6 @@ bool Chassis_IsReturning(void)
   return (g_chassis_homing != 0u);
 }
 
-void Chassis_SetAutoHome(uint8_t enable)
-{
-  s_auto_home = (enable != 0u) ? 1u : 0u;
-  if (s_auto_home == 0u)
-  {
-    g_chassis_homing = 0u;
-  }
-}
-
-uint8_t Chassis_GetAutoHome(void)
-{
-  return s_auto_home;
-}
-
 float Chassis_GetHomeDistance(void)
 {
   return g_chassis_home_mm;
@@ -530,12 +570,29 @@ float Chassis_GetHomeDistance(void)
 void Chassis_SetMode(Chassis_Mode_t mode)
 {
   g_chassis_mode = (uint8_t)mode;
+
+  /* 切模式时把所有"目标"清零，避免切过去就冲出去 */
+  s_cmd_vx    = 0.0f;
+  s_cmd_vy    = 0.0f;
+  s_cmd_w     = 0.0f;
+  s_vx_cmd    = 0.0f;
+  s_vy_cmd    = 0.0f;
+  s_omega_cmd = 0.0f;
+
   if (mode == CHASSIS_MODE_OPEN)
   {
     g_chassis_homing = 0u;
     for (uint8_t w = 0u; w < CHASSIS_MOTOR_NUM; w++)
     {
-      g_chassis_openloop[w] = 0.0f;     /* 先归零，避免切过去就冲出去 */
+      g_chassis_openloop[w] = 0.0f;
+    }
+  }
+  else if (mode == CHASSIS_MODE_VELOCITY)
+  {
+    g_chassis_homing = 0u;
+    for (uint8_t w = 0u; w < CHASSIS_MOTOR_NUM; w++)
+    {
+      g_chassis_openloop[w] = 0.0f;
     }
   }
   else
@@ -543,6 +600,14 @@ void Chassis_SetMode(Chassis_Mode_t mode)
     s_target_yaw    = 0.0f;             /* 切回闭环时重新取当前朝向为 0° */
     s_target_locked = 0u;
   }
+}
+
+void Chassis_SetVelocity(float vx_mms, float vy_mms, float w_dps)
+{
+  /* 只在速度模式下有意义；别的模式下记下来但不生效 */
+  s_cmd_vx = vx_mms * 0.001f;           /* mm/s -> m/s */
+  s_cmd_vy = vy_mms * 0.001f;
+  s_cmd_w  = w_dps;
 }
 
 void Chassis_SetOpenLoop(const float wheel_rpm[CHASSIS_MOTOR_NUM])
@@ -560,6 +625,15 @@ void Chassis_SetOpenLoop(const float wheel_rpm[CHASSIS_MOTOR_NUM])
 void Chassis_Stop(void)
 {
   g_chassis_homing = 0u;
+
+  /* 把速度模式的目标也清掉，否则下一拍 Chassis_Task 又会开回去 */
+  s_cmd_vx    = 0.0f;
+  s_cmd_vy    = 0.0f;
+  s_cmd_w     = 0.0f;
+  s_vx_cmd    = 0.0f;
+  s_vy_cmd    = 0.0f;
+  s_omega_cmd = 0.0f;
+
   for (uint8_t w = 0u; w < CHASSIS_MOTOR_NUM; w++)
   {
     g_chassis_openloop[w] = 0.0f;

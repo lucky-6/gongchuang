@@ -70,6 +70,44 @@ uint16_t MKS_BuildSpeed(uint8_t addr, int32_t rpm_actual, uint16_t mstep,
   return 7u;
 }
 
+uint16_t MKS_RpmToSpeedValueF(float rpm_actual, uint16_t mstep)
+{
+  float v;
+
+  if (mstep == 0u)
+  {
+    mstep = MKS_SPEED_BASE_MSTEP;
+  }
+  if (rpm_actual < 0.0f)
+  {
+    rpm_actual = -rpm_actual;
+  }
+
+  /* value = rpm × 细分 / 16，按"速度值"精度四舍五入（不先量化到整数 RPM） */
+  v = (rpm_actual * (float)mstep) / (float)MKS_SPEED_BASE_MSTEP;
+  if (v > (float)MKS_SPEED_MAX)
+  {
+    v = (float)MKS_SPEED_MAX;
+  }
+  return (uint16_t)(v + 0.5f);
+}
+
+uint16_t MKS_BuildSpeedF(uint8_t addr, float rpm_actual, uint16_t mstep,
+                         uint8_t acc, uint8_t *out)
+{
+  uint16_t speed = MKS_RpmToSpeedValueF(rpm_actual, mstep);
+  uint8_t  dir   = (rpm_actual < 0.0f) ? 1u : 0u;   /* b7：0 = CW，1 = CCW */
+
+  out[0] = MKS_HEAD_DOWN;
+  out[1] = addr;
+  out[2] = MKS_FC_SPEED;
+  out[3] = (uint8_t)((dir << 7) | ((uint16_t)(speed >> 8) & 0x0Fu));
+  out[4] = (uint8_t)(speed & 0xFFu);
+  out[5] = acc;
+  out[6] = MKS_Checksum(out, 6u);
+  return 7u;
+}
+
 uint16_t MKS_BuildMovePulses(uint8_t addr, int32_t pulses, int32_t rpm_actual,
                              uint16_t mstep, uint8_t acc, uint8_t *out)
 {

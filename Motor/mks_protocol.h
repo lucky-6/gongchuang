@@ -45,6 +45,20 @@ uint32_t MKS_RevsToPulses(uint16_t revs, uint16_t mstep);
 uint16_t MKS_BuildSpeed(uint8_t addr, int32_t rpm_actual, uint16_t mstep,
                         uint8_t acc, uint8_t *out);
 
+/**
+  * @brief 实际转速(浮点) -> 协议速度值
+  * @note  与 MKS_RpmToSpeedValue 的区别：入参是浮点，**按速度值精度取整**
+  *        （128 细分时 1 个速度值 = 0.125 RPM），不会先量化到整数 RPM。
+  */
+uint16_t MKS_RpmToSpeedValueF(float rpm_actual, uint16_t mstep);
+
+/**
+  * @brief 组速度模式帧（浮点转速版）
+  * @note  用于低速/高精度场合：避免"先取整到 1 RPM"带来的 8 个速度单位的台阶。
+  */
+uint16_t MKS_BuildSpeedF(uint8_t addr, float rpm_actual, uint16_t mstep,
+                         uint8_t acc, uint8_t *out);
+
 /** @brief 组位置模式1帧（pulses < 0 表示反转），返回帧长 11 */
 uint16_t MKS_BuildMovePulses(uint8_t addr, int32_t pulses, int32_t rpm_actual,
                              uint16_t mstep, uint8_t acc, uint8_t *out);

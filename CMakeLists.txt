@@ -50,11 +50,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Encoder/as5600.c
     IMU/hwt101.c
     Servo/servo_bus.c
-    Servo/servo_arm.c
     Motor/mks_protocol.c
     App/app_chassis.c
     App/app_imu.c
     App/app_odom.c
+    App/app_pose.c
+    App/app_action.c
+    App/user_plan.c
 )
 
 # Add include paths

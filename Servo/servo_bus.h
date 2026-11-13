@@ -40,4 +40,32 @@ bool ServoBus_SetAngle(uint32_t id, float angle_deg, uint8_t speed);
 /** @brief 发原始 CAN 帧（ID>0x0A 用扩展帧），供上层发 0x19/0x2F 等指令 */
 bool ServoBus_SendRaw(uint32_t id, const uint8_t *data, uint8_t len);
 
+/* ==================== 位置回读 ==================== */
+
+/** @brief 周期回传周期 (ms)。29ms 是参考工程用的值 */
+#define SERVO_REPORT_PERIOD_MS   29u
+
+/**
+  * @brief  让指定舵机开启周期位置回传（发 0x19 指令）
+  * @param  period_ms 回传周期，单位 ms
+  * @note   ServoBus_Init() 已经对 5 个已知地址调用过，一般不用自己再调。
+  */
+bool ServoBus_EnableReport(uint32_t id, uint8_t period_ms);
+
+/**
+  * @brief  把 CAN FIFO 里的回传帧取出来，更新各舵机的当前位置
+  * @note   ★必须在主循环周期调用（建议每圈都调，开销很小）。
+  *         不调用的话 FIFO 会被回传帧灌满，位置也不会更新。
+  */
+void ServoBus_Poll(void);
+
+/** @brief 取最近一次收到的原始位置 (0~4095)。false = 该舵机还没回过帧 */
+bool ServoBus_GetRaw(uint32_t id, uint16_t *raw);
+
+/** @brief 取最近一次收到的角度 (°) = raw × 360 / 4096。false = 还没收到 */
+bool ServoBus_GetAngle(uint32_t id, float *deg);
+
+/** @brief 累计收到的回传帧数（诊断用：一直是 0 说明回传没开或接线不对） */
+uint32_t ServoBus_GetRxCount(void);
+
 #endif /* SERVO_BUS_H */
